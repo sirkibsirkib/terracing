@@ -12,7 +12,7 @@ fn noise_pt([xi, yi]: [usize; 2]) -> [f64; 2] {
 }
 
 struct ImgWriter {
-    w: png::StreamWriter<'static, std::io::BufWriter<std::fs::File>>,
+    w: png::StreamWriter<'static, BufWriter<File>>,
 }
 impl ImgWriter {
     fn new(path: &str) -> Self {

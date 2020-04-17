@@ -1,26 +1,49 @@
-const DIMS: [usize; 2] = [512; 2];
-const CELLS: usize = DIMS[0] * DIMS[1];
-
-use core::cmp::Ordering::Equal;
 use noise::{NoiseFn, Perlin, Seedable};
-use rand::Rng;
-use rand::SeedableRng;
+
 use std::io::BufWriter;
 use std::io::Write;
 use std::{fs::File, path::Path};
 
-fn normalized(n: f64) -> f64 {
-    n * 0.5 + 0.5
+const DIMS: [usize; 2] = [512; 2];
+const CELLS: usize = DIMS[0] * DIMS[1];
+
+fn noise_pt([xi, yi]: [usize; 2]) -> [f64; 2] {
+    [
+        //
+        xi as f64 / DIMS[0] as f64,
+        yi as f64 / DIMS[1] as f64,
+    ]
 }
-fn scaled(i: [f64; 2], scalar: f64) -> [f64; 3] {
-    [i[0] * scalar, i[1] * scalar, 0.]
+fn index([xi, yi]: [usize; 2]) -> usize {
+    (yi * DIMS[1]) + xi
 }
 
-fn index([row, col]: [usize; 2]) -> usize {
-    (row * DIMS[1]) + col
+struct ImgWriter {
+    w: png::StreamWriter<'static, std::io::BufWriter<std::fs::File>>,
 }
+impl ImgWriter {
+    fn new(path: &str) -> Self {
+        let path = Path::new(path);
+        let file = File::create(path).unwrap();
+        let w = BufWriter::new(file);
 
-fn png_dump(path: &str, bytes: &[u8; CELLS]) {
+        let mut encoder = png::Encoder::new(w, DIMS[0] as u32, DIMS[1] as u32);
+        encoder.set_color(png::ColorType::RGBA);
+        encoder.set_depth(png::BitDepth::Eight);
+        let w = encoder.write_header().unwrap().into_stream_writer();
+        Self { w }
+    }
+    fn pixel(&mut self, pixel: &[u8; 4]) -> std::io::Result<()> {
+        self.w.write(pixel).map(drop)
+    }
+}
+// impl Drop for ImgWriter {
+//     fn drop(&mut self) {
+//         let _ = self.w.flush();
+//     }
+// }
+
+fn png_dump(path: &str, bytes: impl Iterator<Item = [u8; 3]>) {
     let path = Path::new(path);
     let file = File::create(path).unwrap();
     let w = BufWriter::new(file);
@@ -29,112 +52,227 @@ fn png_dump(path: &str, bytes: &[u8; CELLS]) {
     encoder.set_color(png::ColorType::RGBA);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().unwrap().into_stream_writer();
-    for &byte in bytes.iter() {
-        writer.write(&[byte, byte, byte, 0xff]).unwrap();
+    for [r, g, b] in bytes {
+        writer.write(&[r, g, b, 0xff]).unwrap();
     }
     writer.flush().unwrap();
 }
+const WRITE_RAW: bool = true;
+const WRITE_TER: bool = true;
+const WRITE_BRI: bool = true;
+const WRITE_WAT: bool = true;
 
-fn foo() {
-    let mut arr = [0u8; CELLS];
-    let mut n = noise::BasicMulti::new().set_seed(0);
-
-    n.octaves = 6;
-    n.frequency = 2.;
-    n.lacunarity = std::f64::consts::PI * 2.0 / 3.0;
-    n.persistence = 0.5;
-
-    for row in 0..DIMS[0] {
-        for col in 0..DIMS[1] {
-            let xy = [row as f64 / DIMS[0] as f64, col as f64 / DIMS[0] as f64];
-            let value = n.get(xy);
-            arr[index([row, col])] = ((value * 0.5 + 0.5) * 256.0) as u8;
-        }
+fn new_vec() -> Vec<u8> {
+    let mut v = Vec::with_capacity(CELLS);
+    unsafe {
+        v.set_len(CELLS);
     }
-    png_dump("multi.png", &arr);
+    v
+}
+
+// #[inline(always)]
+fn frac_to_byte(x: f64) -> u8 {
+    if x >= 1. {
+        return 255;
+    }
+    (x * 256.) as u8
 }
 
 fn main() {
-    foo();
-    return;
-    const SCALES: [f64; 10] = [0.125, 0.25, 0.5, 1., 2., 4., 8., 16., 32., 64.];
-    let offset = 0;
+    const P_GROUPS: usize = 13;
+    const SCALAR_C: f64 = 2.;
 
-    let p = [
-        Perlin::new().set_seed(offset + 0),
-        Perlin::new().set_seed(offset + 1),
-        Perlin::new().set_seed(offset + 2),
-        Perlin::new().set_seed(offset + 3),
-        Perlin::new().set_seed(offset + 4),
-        Perlin::new().set_seed(offset + 5),
-        Perlin::new().set_seed(offset + 6),
-        Perlin::new().set_seed(offset + 7),
-        Perlin::new().set_seed(offset + 8),
-        Perlin::new().set_seed(offset + 9),
-        Perlin::new().set_seed(offset + 10),
-        Perlin::new().set_seed(offset + 11),
-    ];
+    let exp: Vec<f64> = (0..P_GROUPS).map(|x| 1.3f64.powf(x as f64)).collect(); // 2^n
 
-    let raw_val_fn = move |[row, col]: [usize; 2]| {
-        let xy = [row as f64 / DIMS[0] as f64, col as f64 / DIMS[0] as f64];
+    let sum_inv_exp: f64 = exp.iter().copied().map(|x| x.recip()).sum();
+    let p: Vec<Perlin> = (1..)
+        .take(P_GROUPS)
+        .map(|seed| Perlin::new().set_seed(seed))
+        .collect();
 
-        let mut raw = 0.0;
-        let threshscale = p[10].get(scaled(xy, 8.0)) + 1.0;
-        let thresh = p[11].get(scaled(xy, threshscale)) * 0.4 + 0.5;
-        for i in 0..10 {
-            let sample = p[i].get(scaled(xy, SCALES[i])) * 0.5 + 0.5;
-            if sample > thresh {
-                let sample = (sample - thresh) * (1. - thresh).min(2.0);
-                raw += sample / 10.0;
+    use rayon::prelude::*;
+    (0..128).into_par_iter().for_each(|var| {
+        let mut iw_ground = ImgWriter::new(&format!("images/image_ground_{}.png", var));
+        let mut iw_terraced = ImgWriter::new(&format!("images/image_terrraced_{}.png", var));
+        let mut iw_water = ImgWriter::new(&format!("images/image_water_{}.png", var));
+        let z = 0.;
+        for xi in 0..DIMS[0] {
+            for yi in 0..DIMS[1] {
+                let [x, y] = noise_pt([xi, yi]);
+                let ground = {
+                    let mut value = 0.;
+                    for (i, perlin) in p.iter().enumerate() {
+                        let scalar = SCALAR_C * exp[i];
+                        let v = perlin.get([x * scalar, y * scalar, z]) * 0.5 + 0.5;
+                        assert!(0. <= v && v <= 1.);
+                        value += v / exp[i];
+                    }
+                    value / sum_inv_exp
+                };
+                let ground_byte = frac_to_byte(ground);
+
+                const MASK: u8 = 0b11111000;
+                let terraced_byte = ground_byte & MASK;
+
+                let water = { p[0].get([x * -0.7, y * -0.7, var as f64 * 0.01]) * 0.3 + 0.5 };
+                let [water_rg_byte, water_b_byte] = {
+                    if ground < water {
+                        let depth = water - ground;
+                        let b_darkness = (depth * 6.).min(1.);
+                        let b = 1. - b_darkness;
+                        // dbg!(depth, b_darkness, b);
+                        [0, frac_to_byte(b)]
+                    } else {
+                        [terraced_byte, terraced_byte]
+                    }
+                };
+
+                iw_ground
+                    .pixel(&[ground_byte, ground_byte, ground_byte, 0xff])
+                    .unwrap();
+                iw_terraced
+                    .pixel(&[terraced_byte, terraced_byte, terraced_byte, 0xff])
+                    .unwrap();
+                iw_water
+                    .pixel(&[water_rg_byte, water_rg_byte, water_b_byte, 0xff])
+                    .unwrap();
             }
         }
-        (raw * 256.0) as u8
+    });
+}
+
+fn foo() {
+    const P_GROUPS: usize = 13;
+    const SCALAR_C: f64 = 2.;
+
+    let exp: Vec<f64> = (0..P_GROUPS).map(|x| 1.3f64.powf(x as f64)).collect(); // 2^n
+                                                                                // let squaring: Vec<f64> = (0..P_GROUPS).map(|x| (x * x) as f64).yilect(); // n^2
+
+    let sum_inv_exp: f64 = exp.iter().copied().map(|x| x.recip()).sum();
+
+    struct Vecs {
+        ground: Vec<u8>,
+        terraced: Vec<u8>,
+        bridges: Vec<u8>,
+        water: Vec<u8>,
+    }
+
+    let mut vecs = Vecs {
+        ground: new_vec(),
+        terraced: new_vec(),
+        bridges: new_vec(),
+        water: new_vec(),
     };
 
-    let mut arr = [0u8; CELLS];
+    let p: Vec<Perlin> = (1..)
+        .take(P_GROUPS)
+        .map(|seed| Perlin::new().set_seed(seed))
+        .collect();
+    for _ in 0..1 {
+        let z = 0.;
+        let ground_val_fn = |[xi, yi]: [usize; 2]| {
+            let [x, y] = noise_pt([xi, yi]);
+            let mut value = 0.0;
+            for (i, perlin) in p.iter().enumerate() {
+                let scalar = SCALAR_C * exp[i];
+                let v = perlin.get([x * scalar, y * scalar, z]) * 0.5 + 0.5;
+                assert!(0. <= v && v <= 1.);
+                value += v / exp[i];
+            }
+            (value * 255. / sum_inv_exp) as u8
+        };
 
-    for row in 0..DIMS[0] {
-        for col in 0..DIMS[1] {
-            let value = raw_val_fn([row, col]);
-            arr[index([row, col])] = value;
+        for xi in 0..DIMS[0] {
+            for yi in 0..DIMS[1] {
+                vecs.ground[index([xi, yi])] = ground_val_fn([xi, yi]);
+            }
         }
-    }
-    png_dump(&format!("seed_{}_0raw.png", offset), &arr);
+        if WRITE_RAW {
+            png_dump(
+                &format!("images/seed_{:.5}_0_ground.png", z),
+                vecs.ground.iter().map(|&b| [b; 3]),
+            );
+        }
 
-    const MASK: u8 = 0b11110000;
-    const STEP: u8 = 0b00010000;
-    const HALF: u8 = 0b00001000;
+        const MASK: u8 = 0b11111000;
+        const STEP: u8 = 0b00001000;
+        const HALF: u8 = 0b00000100;
 
-    for cell in arr.iter_mut() {
-        *cell = *cell & MASK;
-    }
-    png_dump(&format!("seed_{}_1terraced.png", offset), &arr);
+        for (&ground, terraced) in vecs.ground.iter().zip(vecs.terraced.iter_mut()) {
+            *terraced = ground & MASK;
+        }
+        if WRITE_TER {
+            png_dump(
+                &format!("images/seed_{:.5}_1_terraced.png", z),
+                vecs.terraced.iter().map(|&b| [b; 3]),
+            );
+        }
 
-    let mut arr2 = arr;
+        vecs.bridges.clear();
+        vecs.bridges.extend(vecs.terraced.iter().copied());
 
-    let mut rng = rand::rngs::SmallRng::from_seed([4; 16]);
-    for row in 1..DIMS[0] {
-        for col in 1..DIMS[1] {
-            let left = arr[index([row - 1, col])];
-            let up = arr[index([row, col - 1])];
-            let me = arr[index([row, col])];
-            fn dist(a: u8, b: u8) -> u8 {
-                if a < b {
-                    b - a
-                } else {
-                    a - b
+        let p0 = &p[0];
+        for xi in 1..DIMS[0] {
+            for yi in 1..DIMS[1] {
+                let left = vecs.terraced[index([xi - 1, yi])];
+                let up = vecs.terraced[index([xi, yi - 1])];
+                let me = vecs.terraced[index([xi, yi])];
+                fn dist(a: u8, b: u8) -> u8 {
+                    if a < b {
+                        b - a
+                    } else {
+                        a - b
+                    }
+                }
+                let avg = left / 2 + up / 2;
+                if dist(me, left) > STEP || dist(me, up) > STEP {
+                    continue;
+                }
+                let check = || {
+                    let [x, y] = noise_pt([xi, yi]);
+                    p0.get([x * 45. * SCALAR_C, y * 45. * SCALAR_C, z]) > 0.76
+                };
+                if avg < me && check() {
+                    vecs.bridges[index([xi, yi])] = 255;
+                } else if avg > me && check() {
+                    vecs.bridges[index([xi, yi])] = 255;
                 }
             }
-            let avg = left / 2 + up / 2;
-            if dist(me, left) > STEP || dist(me, up) > STEP {
-                continue;
-            }
-            if avg < me && rng.gen_bool(0.03) {
-                arr2[index([row, col])] = 255;
-            } else if avg > me && rng.gen_bool(0.03) {
-                arr2[index([row, col])] = 255;
+        }
+        if WRITE_BRI {
+            png_dump(
+                &format!("images/seed_{:.5}_2_bridges.png", z),
+                vecs.bridges.iter().map(|&b| [b; 3]),
+            );
+        }
+        for xi in 1..DIMS[0] {
+            for yi in 1..DIMS[1] {
+                let idx = index([xi, yi]);
+                // let [x, y] = noise_pt([xi, yi]);
+                // let mut s = 0.0;
+                // s += p[0].get([x + z.sin(), y, 0.]) * 0.82;
+                // s += p[1].get([(x + z.sin()) * 25.0, y * 25.0, z]) * 0.18;
+                let s = 0.0;
+                let wat_byte = ((s * 0.5 + 0.5) * 256.) as u8;
+                let nb = &mut vecs.water[idx];
+                let r = vecs.ground[idx];
+                let n = &mut vecs.bridges[idx];
+                if wat_byte > r {
+                    *n = 255 - 8u8.checked_mul(wat_byte - *n).unwrap_or(255);
+                    *nb = 0;
+                } else {
+                    *nb = vecs.bridges[idx];
+                };
             }
         }
+        if WRITE_WAT {
+            png_dump(
+                &format!("images/seed_{:.5}_3_water.png", z),
+                vecs.bridges
+                    .iter()
+                    .zip(vecs.water.iter())
+                    .map(|(&b, &nb)| [nb, nb, b]),
+            );
+        }
     }
-    png_dump(&format!("seed_{}_2bridges.png", offset), &arr2);
 }

@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-const DIMS: [usize; 2] = [512; 2];
+const DIMS: [usize; 2] = [4000; 2];
 
 fn noise_pt([xi, yi]: [usize; 2]) -> [f64; 2] {
     [xi as f64 / DIMS[0] as f64, yi as f64 / DIMS[1] as f64]
@@ -38,50 +38,93 @@ fn frac_to_byte(x: f64) -> u8 {
     (x * 256.) as u8
 }
 
+fn exp_sample<'a>(
+    perlins: impl Iterator<Item = &'a Perlin> + 'a,
+    [x, y, z]: [f64; 3],
+    mut scalar: f64, // doubles
+) -> f64 {
+    const FACTOR: f64 = 2.;
+    // invariant: scalar.recip() == scalar_recip
+    let mut scalar_recip = scalar.recip(); // halves.
+    let mut sample = 0.;
+    // invariant: -1 <= (sample / sample_unnorm) <= 1
+    let mut sample_unnorm = 0.;
+    for perlin in perlins {
+        let v = perlin.get([x * scalar, y * scalar, z]);
+
+        sample += v * scalar_recip;
+        sample_unnorm += scalar_recip;
+
+        scalar *= FACTOR;
+        scalar_recip /= FACTOR;
+    }
+    sample /= sample_unnorm;
+    assert!(-1. <= sample && sample <= 1.);
+    sample
+}
+
 fn main() {
-    const P_GROUPS: usize = 13;
+    const PERLINS: usize = 7;
     const SCALAR_C: f64 = 2.7;
-    const SEED_OFFSET: u32 = 4;
+    const SEED_OFFSET: u32 = 5;
+    const TERRACES: f64 = 22.;
+    const RAMP_PROP: f64 = 0.12;
 
-    let exp: Vec<f64> = (0..P_GROUPS).map(|x| 1.3f64.powf(x as f64)).collect(); // 2^n
-
-    let sum_inv_exp: f64 = exp.iter().copied().map(|x| x.recip()).sum();
     let p: Vec<Perlin> = (SEED_OFFSET..)
-        .take(P_GROUPS)
+        .take(PERLINS)
         .map(|seed| Perlin::new().set_seed(seed))
         .collect();
 
     use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
-    (0..32).into_par_iter().for_each(|var| {
+    (0..1).into_par_iter().for_each(|var| {
         let mut iw_ground = ImgWriter::new(&format!("images/image_a_ground_{}.png", var));
         let mut iw_terrace = ImgWriter::new(&format!("images/image_b_terraced_{}.png", var));
         let mut iw_water = ImgWriter::new(&format!("images/image_c_water_{}.png", var));
         let mut iw_ramps = ImgWriter::new(&format!("images/image_d_ramps_{}.png", var));
 
-        let z = var as f64 * 0.0001;
+        let ground_z = 0.;
         for xi in 0..DIMS[0] {
             for yi in 0..DIMS[1] {
                 let [x, y] = noise_pt([xi, yi]);
-                let ground = {
-                    let mut value = 0.;
-                    for (i, perlin) in p.iter().enumerate() {
-                        let scalar = SCALAR_C * exp[i];
-                        let v = perlin.get([x * scalar, y * scalar, z]) * 0.5 + 0.5;
-                        assert!(0. <= v && v <= 1.);
-                        value += v / exp[i];
-                    }
-                    value / sum_inv_exp
-                };
+                let ground = exp_sample(p.iter(), [x, y, ground_z], SCALAR_C) * 0.5 + 0.5;
                 let ground_byte = frac_to_byte(ground);
 
-                const TERRACES: f64 = 30.;
-                const TERRACE_STEP: f64 = 1. / TERRACES;
-                let terrace = (ground * TERRACES).round() / TERRACES;
+                let (terrace, is_ramp) = {
+                    let approx_level = ground * TERRACES;
+                    let mut level = approx_level.trunc();
+                    let mut is_ramp = {
+                        // this pixel is a ramp if it was CLOSE to being rounded differently
+                        let diff = approx_level - level;
+                        // is_ramp if we were close to being rounded higher
+                        diff > (1. - RAMP_PROP)
+                    };
+                    let level_is_even = level as u32 % 2 == 0;
+                    {
+                        let mut sample =
+                            exp_sample(p.iter().rev(), [x, y, ground_z], -SCALAR_C * 2.);
+                        const INC_WHEN_OVER: f64 = 0.25;
+                        const CLOSE_WHEN_OVER: f64 = INC_WHEN_OVER * (1. - RAMP_PROP * 0.5);
+                        if level_is_even {
+                            sample = -sample;
+                        }
+                        if sample > CLOSE_WHEN_OVER {
+                            if sample > INC_WHEN_OVER {
+                                level += 1.;
+                                is_ramp = false;
+                            } else {
+                                // we were close to being higher
+                                is_ramp = true;
+                            }
+                        }
+                    }
+                    (level / TERRACES, is_ramp)
+                };
                 let terrace_byte = frac_to_byte(terrace);
 
+                let water_z = var as f64 * 0.01;
                 let water = {
                     //
-                    let pt = [x * -0.7, y * -0.7, var as f64 * 0.01];
+                    let pt = [x * -0.7, y * -0.7, water_z];
                     p[0].get(pt) * 0.1 + 0.5
                 };
                 let [water_rg_byte, water_b_byte, ramp_rg_byte, ramp_b_byte] = {
@@ -92,14 +135,18 @@ fn main() {
                         [0, b_byte, 0, b_byte]
                     } else {
                         let ramp_byte = {
-                            const BRIDGE_PROP: f64 = 0.1;
-                            let terrace_dist = (ground - terrace).abs();
-                            const HALFWAY_DIST: f64 = TERRACE_STEP / 2.;
-                            if (terrace_dist - HALFWAY_DIST).abs() <= HALFWAY_DIST * BRIDGE_PROP {
-                                // this is a ramp!
-                                ground_byte / 2
+                            if is_ramp {
+                                // this is a cliff
+                                let pt = [x * 20. * SCALAR_C, y * 20. * SCALAR_C, ground_z];
+                                if p[1].get(pt) > 0.55 {
+                                    // ramp
+                                    ground_byte
+                                } else {
+                                    // cliff
+                                    ground_byte / 2
+                                }
                             } else {
-                                // not a ramp!
+                                // flat terrace
                                 terrace_byte
                             }
                         };

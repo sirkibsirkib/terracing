@@ -5,7 +5,9 @@ use std::{
     path::Path,
 };
 
-const DIMS: [usize; 2] = [4000; 2];
+mod rivers;
+
+const DIMS: [usize; 2] = [256; 2];
 
 fn noise_pt([xi, yi]: [usize; 2]) -> [f64; 2] {
     [xi as f64 / DIMS[0] as f64, yi as f64 / DIMS[1] as f64]
@@ -64,11 +66,13 @@ fn exp_sample<'a>(
 }
 
 fn main() {
+    rivers::rivers();
+    return;
     const PERLINS: usize = 7;
     const SCALAR_C: f64 = 2.7;
     const SEED_OFFSET: u32 = 5;
-    const TERRACES: f64 = 22.;
-    const RAMP_PROP: f64 = 0.12;
+    const TERRACES: f64 = 25.;
+    const RAMP_PROP: f64 = 0.14;
 
     let p: Vec<Perlin> = (SEED_OFFSET..)
         .take(PERLINS)
@@ -83,8 +87,8 @@ fn main() {
         let mut iw_ramps = ImgWriter::new(&format!("images/image_d_ramps_{}.png", var));
 
         let ground_z = 0.;
-        for xi in 0..DIMS[0] {
-            for yi in 0..DIMS[1] {
+        for yi in 0..DIMS[1] {
+            for xi in 0..DIMS[0] {
                 let [x, y] = noise_pt([xi, yi]);
                 let ground = exp_sample(p.iter(), [x, y, ground_z], SCALAR_C) * 0.5 + 0.5;
                 let ground_byte = frac_to_byte(ground);
@@ -102,7 +106,7 @@ fn main() {
                     {
                         let mut sample =
                             exp_sample(p.iter().rev(), [x, y, ground_z], -SCALAR_C * 2.);
-                        const INC_WHEN_OVER: f64 = 0.25;
+                        const INC_WHEN_OVER: f64 = 0.2;
                         const CLOSE_WHEN_OVER: f64 = INC_WHEN_OVER * (1. - RAMP_PROP * 0.5);
                         if level_is_even {
                             sample = -sample;

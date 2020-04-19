@@ -1,4 +1,4 @@
-use noise::{NoiseFn, OpenSimplex as Noisefield, Seedable};
+use noise::{NoiseFn, OpenSimplex as Field, Seedable};
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -38,19 +38,20 @@ fn frac_to_byte(x: f64) -> u8 {
     (x * 256.) as u8
 }
 
+static mut MAX: f64 = -0.999;
 fn exp_sample<'a>(
-    perlins: impl Iterator<Item = &'a Noisefield> + 'a,
-    [x, y, z]: [f64; 3],
+    fields: impl Iterator<Item = &'a Field> + 'a,
+    [x, y]: [f64; 2],
     mut scalar: f64, // doubles
 ) -> f64 {
-    const FACTOR: f64 = 2.03;
+    const FACTOR: f64 = 2.;
     // invariant: scalar.recip() == scalar_recip
     let mut scalar_recip = scalar.recip(); // halves.
     let mut sample = 0.;
     // invariant: -1 <= (sample / sample_unnorm) <= 1
     let mut sample_unnorm = 0.;
-    for perlin in perlins {
-        let v = perlin.get([x * scalar, y * scalar, z]);
+    for field in fields {
+        let v = field.get([x * scalar, y * scalar]);
 
         sample += v * scalar_recip * 1.;
         sample_unnorm += scalar_recip;
@@ -58,9 +59,25 @@ fn exp_sample<'a>(
         scalar *= FACTOR;
         scalar_recip /= FACTOR;
     }
-    sample /= sample_unnorm * 0.5;
-    assert!(-1. < sample && sample < 1.);
+
+    sample *= 1.9 / sample_unnorm;
+
+    // more_asserts::assert_le!(-1., sample);
+    // more_asserts::assert_le!(sample, 1.);
+    unsafe { MAX = MAX.max(sample) }
+
     sample
+}
+
+fn _field_test_max(field: &Field) -> f64 {
+    let mut m: f64 = -99999999.;
+    let mut x = 0.;
+    for _ in 0usize..1_000_000 {
+        let sample = field.get([x, 0.]);
+        m = m.max(sample);
+        x += 0.0001;
+    }
+    m
 }
 
 fn main() {
@@ -76,27 +93,27 @@ fn main() {
     const TERRACES: f64 = 26.;
     const RAMP_PROP: f64 = 0.14;
 
-    let perlins: Vec<Noisefield> = (0..)
+    let fields: Vec<Field> = (0..)
         .take(TOT_OCTAVES)
-        .map(|seed| Noisefield::new().set_seed(seed))
+        .map(|seed| Field::new().set_seed(seed))
         .collect();
 
     use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
-    (0usize..8).into_par_iter().for_each(|var| {
+    (0usize..16).into_par_iter().for_each(|var| {
         let mut iw_ground = ImgWriter::new(&format!("images/image_{}a_ground.png", var));
         let mut iw_terrace = ImgWriter::new(&format!("images/image_{}b_terraced.png", var));
         let mut iw_water = ImgWriter::new(&format!("images/image_{}c_water.png", var));
         let mut iw_ramps = ImgWriter::new(&format!("images/image_{}d_ramps.png", var));
 
-        let ground_z = 0.;
+        // let ground_z = 0.;
         for yi in 0..DIMS[1] {
             for xi in 0..DIMS[0] {
-                let p = perlins.iter().cycle().skip(var);
+                let p = fields.iter().cycle().skip(var);
 
                 let [x, y] = noise_pt([xi, yi]);
                 let ground = exp_sample(
                     p.clone().skip(GROUND_OCTAVE_OFFSET).take(GROUND_OCTAVES),
-                    [x, y, ground_z],
+                    [x, y],
                     SCALAR_C,
                 ) * 0.5
                     + 0.5;
@@ -116,7 +133,7 @@ fn main() {
                     {
                         let mut sample = exp_sample(
                             p.clone().skip(TERRACE_OCTAVE_OFFSET).take(TERRACE_OCTAVES),
-                            [x, y, ground_z],
+                            [x, y],
                             -SCALAR_C * 2.,
                         );
                         const INC_WHEN_OVER: f64 = 0.2;
@@ -158,7 +175,7 @@ fn main() {
                         let ramp_byte = {
                             if is_ramp {
                                 // this is a cliff
-                                let pt = [x * 20. * SCALAR_C, y * 20. * SCALAR_C, ground_z];
+                                let pt = [x * 20. * SCALAR_C, y * 20. * SCALAR_C];
                                 if p.clone().nth(RAMP_OCTAVE_OFFSET).unwrap().get(pt) > 0.25 {
                                     // ramp
                                     ground_byte
@@ -190,4 +207,7 @@ fn main() {
             }
         }
     });
+    // unsafe {
+    //     dbg!(MAX);
+    // }
 }

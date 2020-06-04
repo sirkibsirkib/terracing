@@ -9,4 +9,4 @@ Generation of one cell involves distinct steps:
 1. terrace boundaries are turned into cliffs (Drawn dark), except for some regions ("ramps").
 1. a water table is generated from a noise field, and submerged regions are drawn underwater.
 
-![Example Image](https://github.com/sirkibsirkib/terracing/tree/master/example.png)
+![Example Image](https://github.com/sirkibsirkib/terracing/blob/master/example.png)
